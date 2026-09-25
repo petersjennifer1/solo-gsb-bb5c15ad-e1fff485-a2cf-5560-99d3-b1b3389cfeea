@@ -1019,6 +1019,21 @@ def test_intersections_self_crossing(client):
         {"original_index": 0, "role": "degenerate", "edge_indices": [0, 2]}]
 
 
+def test_intersections_long_edge_short_edge_scale_bug_regression(client):
+    # 长约 1e9 的水平边与短竖边在内部正交相交：旧实现量纲不一致的
+    # 平行/共线容差会返回空清单，放行相交路径；此处必须报告 crossing
+    K = 500_000_000
+    d = (f"M-{K},0 L{K},0 L{K},2 L-{K},2 Z "
+         "M0,-2 L1,-2 L1,2 L0,2 Z")
+    pid = _mk(client, d)
+    body = client.post(f"/paths/{pid}/intersections").json()
+    crossings = {(i["point"]["x"], i["point"]["y"])
+                 for i in body["intersections"] if i["type"] == "crossing"}
+    assert (0.0, 0.0) in crossings
+    assert (1.0, 0.0) in crossings
+    assert body["intersection_count"] >= 2
+
+
 def test_intersections_endpoint_contact_and_edge_indices(client):
     # 两个轮廓仅共享角点 (10,0)：端点接触，合并两侧边索引
     pid = _mk(client, "M0,0h10v10h-10Z M10,0 L20,0 L20,10 Z")

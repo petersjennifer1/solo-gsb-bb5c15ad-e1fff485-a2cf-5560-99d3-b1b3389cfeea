@@ -34,8 +34,11 @@ from .svggeo import Contour
 
 # 参数域容差：t/u 距端点 1e-9 以内视为端点接触，吸收细分浮点误差
 _EPS_PAR = 1e-9
-# 几何域相对容差：叉积判平行/共线时按边长度缩放
-_EPS_REL = 1e-9
+# 角域（无量纲）容差：|cross|/(|u||v|) <= 该值视为平行，即 sin(夹角) 阈值
+_EPS_ANGLE = 1e-9
+# 线域（无量纲）相对容差：判共线/点落边时的垂直距离阈值 = 该值 ×
+# 对应长度基准（共线取较短边、点落边取被落边）
+_EPS_LINE = 1e-9
 # 输出量化位数（仅影响 JSON 展示，不改变判定与合并键）
 _DECIMALS = 9
 
@@ -138,16 +141,22 @@ def _classify(a, b, c, d):
     wx, wy = a[0] - c[0], a[1] - c[1]
     uu = ux * ux + uy * uy
     vv = vx * vx + vy * vy
-    eps = _EPS_REL * max(1.0, math.hypot(ux, uy), math.hypot(vx, vy))
+    lu, lv = math.sqrt(uu), math.sqrt(vv)
+    # 角域容差无量纲（sin 夹角阈值）；线域容差也是无量纲相对值，由各判定
+    # 乘上与自身量纲一致的长度基准（共线按较短边、点落边按被落边）。
+    # 二者只依赖边向量（与原点位置无关），故同一构型整体平移或等比放大后
+    # 判定不变：长度比 1e9 的长边遇短边正交相交不会再被吞进“平行”分支。
+    sin_tol = _EPS_ANGLE
+    line_rel = _EPS_LINE
 
-    # 零长度边：退化为点是否落在另一条边上
+    # 零长度边：退化为点是否落在另一条边上；距离容差按被落边长度缩放
     if uu == 0.0:
-        return [("endpoint_contact", (a,))] if _point_on_segment(c, d, a, eps) else []
+        return [("endpoint_contact", (a,))] if _point_on_segment(c, d, a, line_rel) else []
     if vv == 0.0:
-        return [("endpoint_contact", (c,))] if _point_on_segment(a, b, c, eps) else []
+        return [("endpoint_contact", (c,))] if _point_on_segment(a, b, c, line_rel) else []
 
     denom = ux * vy - uy * vx
-    if abs(denom) > eps * math.hypot(ux, uy) * math.hypot(vx, vy):
+    if abs(denom) > sin_tol * lu * lv:
         # 非平行：解 a + t·u = c + s·v（w = a - c）
         t = (wy * vx - wx * vy) / denom
         s = (wy * ux - wx * uy) / denom
@@ -160,8 +169,8 @@ def _classify(a, b, c, d):
         kind = "endpoint_contact" if at_end else "crossing"
         return [(kind, (point,))]
 
-    # 平行：不共线则无交点
-    if abs(ux * wy - uy * wx) > eps * math.hypot(ux, uy):
+    # 平行：垂直距离 |u×w|/|u| 超过相对容差 × 较短边长度则不共线
+    if abs(ux * wy - uy * wx) > line_rel * lu * min(lu, lv):
         return []
 
     # 共线：沿 u 方向参数化（q = a + s·u），比较两线段的参数区间
@@ -184,14 +193,20 @@ def _classify(a, b, c, d):
     return [("collinear_overlap", (p_lo, p_hi))]
 
 
-def _point_on_segment(a, b, p, eps) -> bool:
-    """点 p 是否在线段 ab 上（含端点），容差按边长缩放。"""
+def _point_on_segment(a, b, p, line_rel) -> bool:
+    """点 p 是否在线段 ab 上（含端点）。
+
+    ``line_rel`` 为无量纲相对容差：垂直距离阈值 ``line_rel·|ab|``，
+    沿轴包围盒的纵向余量同口径（长度量纲），故等比放大后判定不变。
+    """
     ux, uy = b[0] - a[0], b[1] - a[1]
+    length = math.hypot(ux, uy)
+    dist_eps = line_rel * length
     cross = ux * (p[1] - a[1]) - uy * (p[0] - a[0])
-    if abs(cross) > eps * max(1.0, math.hypot(ux, uy)):
+    if abs(cross) > dist_eps * length:
         return False
-    return (min(a[0], b[0]) - eps <= p[0] <= max(a[0], b[0]) + eps
-            and min(a[1], b[1]) - eps <= p[1] <= max(a[1], b[1]) + eps)
+    return (min(a[0], b[0]) - dist_eps <= p[0] <= max(a[0], b[0]) + dist_eps
+            and min(a[1], b[1]) - dist_eps <= p[1] <= max(a[1], b[1]) + dist_eps)
 
 
 # ---------------------------------------------------------------------------
@@ -199,17 +214,34 @@ def _point_on_segment(a, b, p, eps) -> bool:
 # ---------------------------------------------------------------------------
 
 def _merge_key(kind: str, coord: tuple) -> tuple:
-    """同坐标同类型交点的合并键（坐标量化，吸收表示层浮点噪声）。"""
+    """同坐标同类型交点的合并键（相对量化，吸收表示层浮点噪声）。"""
     if kind == "collinear_overlap":
         p1, p2 = coord
-        return (kind, _q(p1), _q(p2))
-    return (kind, _q(coord[0]))
+        return (kind, _qm(p1), _qm(p2))
+    return (kind, _qm(coord[0]))
 
 
 def _q(p: tuple[float, float]) -> tuple[float, float]:
+    """显示量化：绝对 9 位小数量化（仅影响 JSON 展示）。"""
     qx, qy = round(p[0], _DECIMALS), round(p[1], _DECIMALS)
     return (qx + 0.0 if qx == 0 else qx,
             qy + 0.0 if qy == 0 else qy)
+
+
+def _qm(p: tuple[float, float]) -> tuple[float, float]:
+    """合并键量化：按坐标量级取**相对**精度（量纲一致）。
+
+    同一几何交点由不同边对独立插值或由顶点字面量给出时，在大坐标
+    （如 1e13 处 ULP≈5e-4）下绝对 1e-9 量化无法吸收其差，会把同一
+    交点拆成多条；按相对 1e-9（即 ``_EPS_PAR``，与参数域容差同口径）
+    取分格则与位置、尺度无关：整体平移或等比放大后合并结果一致。
+    """
+    def one(v: float) -> float:
+        if v == 0.0:
+            return 0.0
+        step = 10 ** math.floor(math.log10(abs(v))) * _EPS_PAR
+        return round(v / step) * step
+    return (one(p[0]), one(p[1]))
 
 
 def _pt(p: tuple[float, float]) -> dict[str, float]:

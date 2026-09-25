@@ -54,7 +54,7 @@ evenodd / nonzero 填充规则汇总为 inside / outside，开放子路径不参
 │   ├── holeclearance.py # 孔洞最大内接圆：距离上界优先网格细分、直属岛避让、预算超限报错
 │   ├── windowcov.py   # 矩形窗口覆盖分析：Sutherland–Hodgman 裁剪、层级交替累加、逐窗覆盖率
 │   └── diff.py        # 版本差异审计：指纹+索引稳定匹配、三类 modified 分类
-├── tests/             # pytest 单元 + API 端到端测试（377 个）
+├── tests/             # pytest 单元 + API 端到端测试（383 个）
 ├── Dockerfile
 ├── docker-compose.yml
 ├── requirements.txt
@@ -719,6 +719,24 @@ curl -s -X POST localhost:8000/paths/1/intersections
 干净的轮廓（如外方 + 不接触的内孔）与空路径返回空清单
 （`intersection_count` 为 `0`、`intersections` 为 `[]`）。
 
+平行 / 共线判定使用**量纲一致的容差**：角度阈值是无量纲的
+`|u×v|/(|u||v|)`（sin 夹角），共线/点落边阈值是**长度量纲**且按
+**较短边**长度缩放。因此同一构型经**整体平移或等比放大**后，
+`crossing` / `endpoint_contact` / `collinear_overlap` 的类型与涉及边索引
+保持一致——例如长约 10⁹ 的水平边与短竖边在内部正交相交时，不会再因
+尺度被误判为“平行”而漏报、放行相交路径；近乎平行但真正分离的边
+（垂直间距大于相对容差 × 短边）仍返回空清单，不会误报。
+
+```bash
+# 两条闭合轮廓：长 1e9 的水平边被短竖边在内部正交穿过
+curl -s -X POST localhost:8000/paths -H 'Content-Type: application/json' -d '{
+  "d": "M-500000000,0 L500000000,0 L500000000,2 L-500000000,2 Z M0,-2 L1,-2 L1,2 L0,2 Z"
+}'
+curl -s -X POST localhost:8000/paths/1/intersections
+# -> intersection_count=5；短轮廓底/左边与大矩形底边在 (0,0)/(1,0)
+#    的内部交叉均为 "crossing"（不被尺度吞掉），端点压边仍为 endpoint_contact
+```
+
 ### `POST /paths/{id}/hit-test` — 批量点命中测试（只读）
 
 对已存路径的**原始 `d` 即时解析**（复用与 metrics / clearance / intersections
@@ -1082,7 +1100,7 @@ SVG 规范的端点参数化算法；在标志位或坐标处被截断的非法�
 
 ```bash
 pip install -r requirements-dev.txt
-pytest -q          # 377 passed
+pytest -q          # 383 passed
 ```
 
 覆盖：解析器边界（非法命令流、`Z` 后零参数命令不得隐式重复的死循环回归、
@@ -1127,7 +1145,12 @@ added/removed、元数据透传、未规范化即时审计与脏数据 422；
 （区间两端与重叠并存）、不同子路径交叉/角点接触/T 接触/共线重叠、
 三轮廓同点同类型合并边索引、开放轮廓跳过且不与闭合轮廓比较、闭合退化轮廓
 仍参与、单点闭合、贝塞尔/弧细分后求交、按轮廓与边索引稳定排序、跨调用
-确定性、两种填充规则一致、空路径空清单、只读不落库、404/非法 id/脏数据 422 等；
+确定性、两种填充规则一致、空路径空清单、
+**量纲一致容差的尺度不变性**（1e9 长边×短竖边内部正交相交不被误判平行
+而漏报，同一非退化构型整体平移/等比放大 1e-3…1e9 后 crossing/
+endpoint_contact/collinear_overlap 的类型与涉及边索引一致，大坐标
+非有理数捏合顶点按相对量化仍合并、近乎平行但分离的边不误报）、
+只读不落库、404/非法 id/脏数据 422 等；
 批量点命中测试的单环 inside/outside、各边与闭合边 boundary 优先、对角线/
 斜边命中、外-孔在两种填充规则下一致、同向重叠 nonzero 填充而 evenodd
 留空、反向重叠绕数抵消、三重重叠奇偶、蝴蝶结等零净面积闭合自交路径仍
