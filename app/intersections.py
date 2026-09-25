@@ -23,6 +23,10 @@
 ``collinear_overlap`` 的合并键为（字典序排列的）重叠区间两端。
 最终清单按涉及的轮廓/边索引稳定排序。整个计算只读、即时完成：
 不依赖已保存的规范化结果，也不写库。
+
+平行/共线判定使用**量纲一致**的相对容差（平行看 sin 夹角、共线看
+直线间距离按边长缩放），故同一非退化构型整体平移或等比放大后，交点
+类型与涉及边索引保持一致，1e9 量级长边不会吞掉短边的正交内部交叉。
 """
 
 from __future__ import annotations
@@ -34,7 +38,8 @@ from .svggeo import Contour
 
 # 参数域容差：t/u 距端点 1e-9 以内视为端点接触，吸收细分浮点误差
 _EPS_PAR = 1e-9
-# 几何域相对容差：叉积判平行/共线时按边长度缩放
+# 几何域相对容差：叉积类判定统一折算为无量纲（sin 夹角）或长度量纲
+# （直线间距离）后按 1e-9 比较，使判定随整体平移/等比放大保持一致
 _EPS_REL = 1e-9
 # 输出量化位数（仅影响 JSON 展示，不改变判定与合并键）
 _DECIMALS = 9
@@ -138,16 +143,22 @@ def _classify(a, b, c, d):
     wx, wy = a[0] - c[0], a[1] - c[1]
     uu = ux * ux + uy * uy
     vv = vx * vx + vy * vy
-    eps = _EPS_REL * max(1.0, math.hypot(ux, uy), math.hypot(vx, vy))
+    lu = math.sqrt(uu)
+    lv = math.sqrt(vv)
+    # 距离量纲容差：按两条边的较大长度缩放（边长 <1 时取 1，防除零）
+    dist_eps = _EPS_REL * max(1.0, lu, lv)
 
     # 零长度边：退化为点是否落在另一条边上
     if uu == 0.0:
-        return [("endpoint_contact", (a,))] if _point_on_segment(c, d, a, eps) else []
+        return [("endpoint_contact", (a,))] if _point_on_segment(c, d, a, dist_eps) else []
     if vv == 0.0:
-        return [("endpoint_contact", (c,))] if _point_on_segment(a, b, c, eps) else []
+        return [("endpoint_contact", (c,))] if _point_on_segment(a, b, c, dist_eps) else []
 
     denom = ux * vy - uy * vx
-    if abs(denom) > eps * math.hypot(ux, uy) * math.hypot(vx, vy):
+    # 平行判定须为无量纲量：|u×v|/(|u||v|) = sin 夹角，
+    # 阈值与边长度无关——否则长边（如 1e9）会把真正正交的边对
+    # 误判为平行而漏报内部交叉
+    if abs(denom) > _EPS_REL * lu * lv:
         # 非平行：解 a + t·u = c + s·v（w = a - c）
         t = (wy * vx - wx * vy) / denom
         s = (wy * ux - wx * uy) / denom
@@ -160,8 +171,9 @@ def _classify(a, b, c, d):
         kind = "endpoint_contact" if at_end else "crossing"
         return [(kind, (point,))]
 
-    # 平行：不共线则无交点
-    if abs(ux * wy - uy * wx) > eps * math.hypot(ux, uy):
+    # 平行：(u×w)/|u| 是直线 cd 上点 c 到直线 ab 的有向距离（长度量纲），
+    # 不共线则无交点；容差随尺度缩放，近平行且分离的边不会误报
+    if abs(ux * wy - uy * wx) > dist_eps * lu:
         return []
 
     # 共线：沿 u 方向参数化（q = a + s·u），比较两线段的参数区间

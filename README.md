@@ -54,7 +54,7 @@ evenodd / nonzero 填充规则汇总为 inside / outside，开放子路径不参
 │   ├── holeclearance.py # 孔洞最大内接圆：距离上界优先网格细分、直属岛避让、预算超限报错
 │   ├── windowcov.py   # 矩形窗口覆盖分析：Sutherland–Hodgman 裁剪、层级交替累加、逐窗覆盖率
 │   └── diff.py        # 版本差异审计：指纹+索引稳定匹配、三类 modified 分类
-├── tests/             # pytest 单元 + API 端到端测试（377 个）
+├── tests/             # pytest 单元 + API 端到端测试（387 个）
 ├── Dockerfile
 ├── docker-compose.yml
 ├── requirements.txt
@@ -671,7 +671,13 @@ curl -s -X POST localhost:8000/paths/1/tabs \
 - **同坐标、同类型**的交点合并为一条，其涉及的全部
   `(轮廓 original_index, 边索引)` 汇总到该条目的 `contours[]`
   （每项含 `role` 与升序的 `edge_indices`；边 k 指细分顶点
-  `points[k] → points[(k+1) mod n]`）；结果按涉及的轮廓/边索引稳定排序。
+  `points[k] → points[(k+1) mod n]`）；结果按涉及的轮廓/边索引稳定排序；
+- 判定容差**量纲一致**：平行判定比较无量纲的
+  `|u×v| / (|u|·|v|)`（两方向的 sin 夹角），共线判定比较
+  `|u×w| / |u|`（两直线间的有向距离，按边长相对缩放）。
+  因此同一非退化构型经**整体平移或等比放大**（含 1e9 量级长边）后，
+  `crossing` / `endpoint_contact` / `collinear_overlap` 的类型与涉及
+  边索引保持一致；近乎平行但确实分离的边仍判为无交点，不会误报。
 
 无请求体。路径不存在返回 `404`；已存路径无法解析（历史脏数据）返回 `422`。
 
@@ -718,6 +724,26 @@ curl -s -X POST localhost:8000/paths/1/intersections
 
 干净的轮廓（如外方 + 不接触的内孔）与空路径返回空清单
 （`intersection_count` 为 `0`、`intersections` 为 `[]`）。
+
+判定对**整体平移与等比放大一致**：即使轮廓边长达 `10^9`，短竖边在内部
+正交贯穿长边仍会被报为 `crossing`（旧版平行容差带长度³量纲，长边会把
+正交边对误判为平行而漏报、可能放行相交路径）：
+
+```bash
+# 1e9 长的长条矩形，被跨在其底边上的 10x10 小矩形在 (5e8±5, 0) 处贯穿两次
+curl -s -X POST localhost:8000/paths -H 'Content-Type: application/json' -d '{
+  "d": "M0,0 L1000000000,0 L1000000000,10 L0,10 Z M499999995,-5 L500000005,-5 L500000005,5 L499999995,5 Z"
+}'
+curl -s -X POST localhost:8000/paths/1/intersections
+# -> {"intersection_count":2,
+#     "intersections":[
+#       {"type":"crossing","point":{"x":500000005.0,"y":0.0},
+#        "contours":[{"original_index":0,...,"edge_indices":[0]},
+#                    {"original_index":1,...,"edge_indices":[1]}]},
+#       {"type":"crossing","point":{"x":499999995.0,"y":0.0},
+#        "contours":[{"original_index":0,...,"edge_indices":[0]},
+#                    {"original_index":1,...,"edge_indices":[3]}]}], ...}
+```
 
 ### `POST /paths/{id}/hit-test` — 批量点命中测试（只读）
 
@@ -1082,7 +1108,7 @@ SVG 规范的端点参数化算法；在标志位或坐标处被截断的非法�
 
 ```bash
 pip install -r requirements-dev.txt
-pytest -q          # 377 passed
+pytest -q          # 387 passed
 ```
 
 覆盖：解析器边界（非法命令流、`Z` 后零参数命令不得隐式重复的死循环回归、
@@ -1127,7 +1153,10 @@ added/removed、元数据透传、未规范化即时审计与脏数据 422；
 （区间两端与重叠并存）、不同子路径交叉/角点接触/T 接触/共线重叠、
 三轮廓同点同类型合并边索引、开放轮廓跳过且不与闭合轮廓比较、闭合退化轮廓
 仍参与、单点闭合、贝塞尔/弧细分后求交、按轮廓与边索引稳定排序、跨调用
-确定性、两种填充规则一致、空路径空清单、只读不落库、404/非法 id/脏数据 422 等；
+确定性、两种填充规则一致、空路径空清单、**1e9 长边被短竖边内部正交
+贯穿的尺度漏报回归（crossing 不漏报）**、三类构型在整体平移与等比放大后
+类型与涉及边索引保持一致、近平行但分离的边（含 1e9 尺度）不误报共线/
+重叠、近平行短边内部真交叉仍检出、只读不落库、404/非法 id/脏数据 422 等；
 批量点命中测试的单环 inside/outside、各边与闭合边 boundary 优先、对角线/
 斜边命中、外-孔在两种填充规则下一致、同向重叠 nonzero 填充而 evenodd
 留空、反向重叠绕数抵消、三重重叠奇偶、蝴蝶结等零净面积闭合自交路径仍

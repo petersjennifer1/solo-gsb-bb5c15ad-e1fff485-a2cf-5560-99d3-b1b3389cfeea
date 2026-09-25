@@ -1104,6 +1104,21 @@ def test_intersections_is_readonly_and_needs_no_prior_normalization(client):
     assert client.get(f"/paths/{pid}").json()["normalized"] is None
 
 
+def test_intersections_huge_scale_orthogonal_crossing_regression(client):
+    # 回归：1e9 长水平边被短竖边在内部正交贯穿时不得漏报
+    pid = _mk(client,
+              "M0,0 L1000000000,0 L1000000000,10 L0,10 Z "
+              "M499999995,-5 L500000005,-5 L500000005,5 L499999995,5 Z")
+    body = client.post(f"/paths/{pid}/intersections").json()
+    crossings = [i for i in body["intersections"] if i["type"] == "crossing"]
+    assert len(crossings) == 2
+    for item in crossings:
+        assert [g["original_index"] for g in item["contours"]] == [0, 1]
+        assert item["contours"][0]["edge_indices"] == [0]
+    assert sorted(item["contours"][1]["edge_indices"]
+                  for item in crossings) == [[1], [3]]
+
+
 def test_intersections_404(client):
     assert client.post("/paths/999999/intersections").status_code == 404
 

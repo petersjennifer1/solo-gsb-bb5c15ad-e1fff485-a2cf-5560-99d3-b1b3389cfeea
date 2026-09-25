@@ -3,9 +3,11 @@
 import os
 import sys
 
+import pytest
+
 sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), "..")))
 
-from app.intersections import find_intersections  # noqa: E402
+from app.intersections import _classify, find_intersections  # noqa: E402
 from app.svggeo import Contour, analyze_contours  # noqa: E402
 
 
@@ -283,6 +285,107 @@ def test_evenodd_same_as_nonzero_for_geometry():
     _c, a = _find(d, "nonzero")
     _c, b = _find(d, "evenodd")
     assert a["intersections"] == b["intersections"]
+
+
+# ---------------------------------------------------------------------------
+# 尺度一致性：量纲一致的容差与平移 / 等比放大不变性（回归 1e9 漏报）
+# ---------------------------------------------------------------------------
+
+def test_long_edge_orthogonal_crossing_at_huge_scale_not_missed():
+    # 1e9 长的水平边被短竖边（长 10）在内部正交贯穿：旧实现的平行
+    # 阈值带长度³量纲，恰好把 sin 夹角=1 的正交边对误判为平行 -> 漏报
+    big = _contour(0, [(0.0, 0.0), (1e9, 0.0), (1e9, 10.0), (0.0, 10.0)])
+    small = _contour(1, [(5e8 - 5, -5.0), (5e8 + 5, -5.0),
+                         (5e8 + 5, 5.0), (5e8 - 5, 5.0)])
+    res = find_intersections([big, small])
+    crossings = [i for i in res["intersections"] if i["type"] == "crossing"]
+    assert len(crossings) == 2
+    for item in crossings:
+        assert [g["original_index"] for g in item["contours"]] == [0, 1]
+        assert item["contours"][0]["edge_indices"] == [0]   # 长边
+        assert item["contours"][1]["edge_indices"] in ([1], [3])  # 两条短竖边
+
+
+def test_unit_long_edge_orthogonal_crossing_at_huge_coordinates():
+    # 同样构型但坐标整体搬到 1e9 附近（边本身只有 10 个单位长）：
+    # 平移不改变判定，两条短竖边仍在内部穿过长边
+    big = _contour(0, [(1e9, 1e9), (1e9 + 10, 1e9),
+                       (1e9 + 10, 1e9 + 10), (1e9, 1e9 + 10)])
+    small = _contour(1, [(1e9 + 2, 1e9 - 5), (1e9 + 8, 1e9 - 5),
+                         (1e9 + 8, 1e9 + 5), (1e9 + 2, 1e9 + 5)])
+    res = find_intersections([big, small])
+    crossings = [i for i in res["intersections"] if i["type"] == "crossing"]
+    assert len(crossings) == 2
+
+
+def _signature(res):
+    """交点清单的（类型, 涉及轮廓/边索引）签名——不含坐标，供跨构型比较。"""
+    return sorted(
+        (item["type"],
+         tuple((g["original_index"], tuple(g["edge_indices"]))
+               for g in item["contours"]))
+        for item in res["intersections"]
+    )
+
+
+def _transform(pts, sx, sy, k):
+    return [(x * k + sx, y * k + sy) for x, y in pts]
+
+
+# 同一非退化构型的三种典型关系，覆盖三类输出
+_INVARIANT_CONFIGS = [
+    # 两轮廓内部正交交叉（两个 crossing）
+    ([(0.0, 0.0), (10.0, 0.0), (10.0, 10.0), (0.0, 10.0)],
+     [(2.0, -5.0), (8.0, -5.0), (8.0, 5.0), (2.0, 5.0)]),
+    # 角点相触（一个 endpoint_contact）
+    ([(0.0, 0.0), (10.0, 0.0), (10.0, 10.0), (0.0, 10.0)],
+     [(10.0, 0.0), (20.0, 0.0), (20.0, 10.0), (10.0, 10.0)]),
+    # 共线重叠（重叠区间 + 两端端点接触）
+    ([(0.0, 0.0), (10.0, 0.0), (10.0, 10.0), (0.0, 10.0)],
+     [(2.0, -10.0), (8.0, -10.0), (8.0, 0.0), (2.0, 0.0)]),
+]
+
+
+@pytest.mark.parametrize("shift,scale", [
+    (0.0, 1.0),        # 原点附近
+    (1e9, 1.0),        # 整体平移到 1e9
+    (-1234567.0, 1.0),
+    (0.0, 1e6),        # 等比放大 1e6（含 1e9 量级长边）
+    (1e9, 1e6),        # 放大后再平移
+])
+def test_classification_invariant_under_translation_and_scale(shift, scale):
+    for base_a, base_b in _INVARIANT_CONFIGS:
+        pa = _transform(base_a, shift, shift, scale)
+        pb = _transform(base_b, shift, shift, scale)
+        res = find_intersections([_contour(0, pa), _contour(1, pb)])
+        base = find_intersections(
+            [_contour(0, base_a), _contour(1, base_b)])
+        assert _signature(res) == _signature(base), (shift, scale)
+
+
+def test_near_parallel_separated_edges_do_not_false_positive():
+    # 夹角 1e-7 rad（远大于平行阈值 1e-9）、分离距离 0.5（在旧实现
+    # 1e9 尺度的共线带内）：旧实现误报 collinear_overlap，正确结果为空
+    a, b = (0.0, 0.0), (1e9, 0.0)
+    c, d = (0.0, 0.5), (1e9, 1000.5)
+    assert _classify(a, b, c, d) == []
+    # 同构型缩小 1e6 倍同样为空
+    a, b = (0.0, 0.0), (1000.0, 0.0)
+    c, d = (0.0, 5e-7), (1000.0, 1.0000005)
+    assert _classify(a, b, c, d) == []
+    # 真正平行且分离（任何尺度）也为空
+    assert _classify((0.0, 0.0), (1e9, 0.0),
+                     (0.0, 5.0), (1e9, 5.0)) == []
+
+
+def test_near_parallel_edges_with_real_crossing_still_detected():
+    # 近平行（夹角 1e-8 rad > 平行阈值 1e-9）的短边在内部跨越长边：
+    # 不得因平行阈值随边长放大而漏报。短边长 20、纵向落差 2e-7
+    a, b = (0.0, 0.0), (1e9, 0.0)
+    c, d = (5e8 - 10, -1e-7), (5e8 + 10, 1e-7)
+    out = _classify(a, b, c, d)
+    assert len(out) == 1
+    assert out[0][0] == "crossing"
 
 
 # ---------------------------------------------------------------------------
